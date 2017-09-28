@@ -12,7 +12,7 @@ rho = 1e-3 # density
 gamma = 1.4 # specific heat capacity ratio
 p0 = 1e6 #the atmospheric pressure
 sigmaPMLMax = 10 # Max value for sigma PML
-DPML = 1
+DPML = 2
 
 # Create mesh
 channel = Rectangle(Point(0, 0), Point(8, 2))
@@ -35,7 +35,7 @@ walls = 'near(x[1], 0) || near(x[1], 2)'
 class PML(SubDomain):
 	def inside(self, x, on_boundary):
 		tol = 1e-14
-		return x[0] >= 7 + tol
+		return x[0] >= 8-DPML + tol
 
 PMLvalid = CellFunction('size_t', mesh)
 PMLregion = PML()
@@ -53,22 +53,29 @@ class SigmaPMLfield(Expression):
 			values[0] = 0
 			#values[1] = 0
 		else:
-			values[0] = self.sigmaPMLMax * pow((x[0] - 7)/1, 4)
+			values[0] = self.sigmaPMLMax * pow((x[0] - (8-DPML))/DPML, 4)
 
 SigmaPML = SigmaPMLfield(PMLvalid, sigmaPMLMax, degree=0)
 # Define trial and test functions
 (v, q) = TestFunctions(W)
 (qv_t, qp_t) = TestFunctions(W)
+(qv2_t, qp2_t) = TestFunctions(W)
 
 # Define functions for solutions at previous and current time steps
 w = Function(W)
 (u, p) = (as_vector((w[0],w[1])),w[2])
 w_PML = Function(W)
 (qv, qp) = (as_vector((w_PML[0],w_PML[1])),w_PML[2])
+w_PML2 = Function(W)
+(qv2, qp2) = (as_vector((w_PML2[0],w_PML2[1])),w_PML2[2])
+
 w_n = Function(W)
 (u_n, p_n) = (as_vector((w_n[0],w_n[1])),w_n[2])
 w_PML_n = Function(W)
 (qv_n, qp_n) = (as_vector((w_PML_n[0],w_PML_n[1])),w_PML_n[2])
+w_PML2_n = Function(W)
+(qv2_n, qp2_n) = (as_vector((w_PML2_n[0],w_PML2_n[1])),w_PML2_n[2])
+
 
 # Define expressions used in variational forms
 U = 0.5*(u_n + u)
@@ -113,8 +120,8 @@ F += C
 
 # assume everthing for the meanflow is zero
 # add the PML terms
-F += rho*SigmaPML*dot(qv_n,v)*dx + rho*SigmaPML*dot((u_n-qv_n),v)*dx \
-+ SigmaPML*dot(qp_n,q)*dx + SigmaPML*dot((p_n-qp_n),q)*dx	
+F += rho*SigmaPML*dot(qv_n,v)*dx + rho*SigmaPML*dot(qv2_n,v)*dx \
++ SigmaPML*dot(qp_n,q)*dx + SigmaPML*dot(qp2_n,q)*dx	
 
 # residual of strong Navier-Stokes
 #continuity
@@ -145,11 +152,21 @@ F_PML = rho*dot((qv - qv_n) / k, qv_t)*dx \
 
 Jqv = derivative(F_PML, w_PML)
 
+F_PML2 = rho*dot((qv2 - qv2_n) / k, qv2_t)*dx \
++ rho*dot(u_n2*u_n.dx(1) , qv2_t)*dx \
++ p_n.dx(1)*qv2_t[1]*dx \
++ rho*SigmaPML*dot(qv2, qv2_t)*dx \
++ qp2_t*((qp2 - qp2_n) / k)/p0*dx + qp2_t*gamma*(p0 + p)*u_n2.dx(1)/p0*dx \
++ qp2_t*p_n.dx(1)*u_n2/p0*dx + SigmaPML*qp2_t*qp2*dx
+
+Jqv2 = derivative(F_PML2, w_PML2)
 # Create XDMF files for visualization output
 xdmffile_u = XDMFFile('results/velocity.xdmf')
 xdmffile_p = XDMFFile('results/pressure.xdmf')
 xdmffile_qp = XDMFFile('results/qp.xdmf')
 xdmffile_qv = XDMFFile('results/qv.xdmf')
+xdmffile_qp2 = XDMFFile('results/qp2.xdmf')
+xdmffile_qv2 = XDMFFile('results/qv2.xdmf')
 
 # Time-stepping
 t = 0
@@ -160,7 +177,7 @@ for n in range(num_steps):
 	t += dt
 
 	# Define inflow profile
-	inflow_profile = Expression(('6.0*exp(-0.5*pow((t-0.5e-4)/0.15e-4 ,2))','0'),degree=2,t=t)
+	inflow_profile = Expression(('1.0*exp(-0.5*pow((t-0.5e-4)/0.15e-4 ,2))','0'),degree=2,t=t)
 
 	# Define boundary conditions
 	bcu_inflow = DirichletBC(W.sub(0), inflow_profile, inflow)
@@ -180,25 +197,36 @@ for n in range(num_steps):
 	solver_pml = NonlinearVariationalSolver(problem_pml)
 	solver_pml.parameters['newton_solver']['maximum_iterations'] = 20
 	
+	problem_pml2 = NonlinearVariationalProblem(F_PML2, w_PML2, bcsqv, Jqv2)
+	solver_pml2 = NonlinearVariationalSolver(problem_pml2)
+	solver_pml2.parameters['newton_solver']['maximum_iterations'] = 20
 	# Assemble matrices
 	begin("Solving ....")
 	print('Time step {}'.format(n))
 	solver.solve()
 	end()
-	begin("Solving PML")
+	begin("Solving PML q1")
 	solver_pml.solve()
+	end()
+	begin("Solving PML q2")
+	solver_pml2.solve()
 	end()
 	u, p = w.split()
 	qv, qp = w_PML.split()
+	qv2, qp2 = w_PML2.split()
 
 	# Save solution to file (XDMF/HDF5)
 	xdmffile_u.write(u, t)
 	xdmffile_p.write(p, t)
 	xdmffile_qp.write(qp, t)
 	xdmffile_qv.write(qv, t)
+	xdmffile_qv2.write(qv2, t)
+	xdmffile_qp2.write(qp2, t)
 	# Save nodal values to file
 	# Update previous solution
 	w_n.assign(w)
+	w_PML_n.assign(w_PML)
+	w_PML2_n.assign(w_PML2)
 
 # Hold plot
 #interactive()
